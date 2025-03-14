@@ -1,0 +1,4 @@
+-e "venv/\nlogs/" 
+data
+garment_segmentation_dataset.rar
+venv
