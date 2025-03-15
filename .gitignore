@@ -2,3 +2,7 @@
 data
 garment_segmentation_dataset.rar
 venv
+*.pth
+logs
+*.pyc
+utils/__pycache__
