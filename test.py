@@ -22,8 +22,8 @@ def parse_args():
                         help="Path to model checkpoint")
     parser.add_argument("--img-dir", type=str, default="data/val/images", 
                         help="Directory containing images")
-    parser.add_argument("--mask-dir", type=str, default="data/val/masks", 
-                        help="Directory containing ground truth masks")
+    parser.add_argument("--output-dir", type=str, default="data/val/outputs", 
+                        help="Directory containing ground truth outputs")
     parser.add_argument("--output", type=str, default="testResults/", 
                         help="Output directory for results")
     parser.add_argument("--batch-size", type=int, default=4, 
@@ -53,8 +53,8 @@ def main(args):
     print(f"✅ Model loaded on {device}")
     
     # Load test data
-    print(f"📂 Loading test data from {args.img_dir} and {args.mask_dir}...")
-    test_loader = get_val_dataloader(args.img_dir, args.mask_dir, batch_size=args.batch_size)
+    print(f"📂 Loading test data from {args.img_dir} and {args.output_dir}...")
+    test_loader = get_val_dataloader(args.img_dir, args.output_dir, batch_size=args.batch_size)
     print(f"✅ Loaded {len(test_loader.dataset)} test images")
     
     # Initialize metrics

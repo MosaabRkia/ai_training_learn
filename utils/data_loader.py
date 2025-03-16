@@ -61,7 +61,7 @@ def mask_to_rgb(mask, class_mapping):
 
 # ✅ Define Augmentations
 train_transform = A.Compose([
-    A.Resize(TRAIN_IMAGE_HEIGHT, TRAIN_IMAGE_WIDTH),
+    # A.Resize(TRAIN_IMAGE_HEIGHT, TRAIN_IMAGE_WIDTH),
     A.HorizontalFlip(p=0.5),
     A.RandomBrightnessContrast(p=0.3),
     A.Affine(scale=(0.95, 1.05), translate_percent=(0.05, 0.05), rotate=(-15, 15), p=0.5),
