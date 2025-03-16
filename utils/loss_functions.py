@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from config import NUM_CLASSES
+from tqdm import tqdm
 
 class DiceLoss(nn.Module):
     """
@@ -101,22 +102,129 @@ class CombinedLoss(nn.Module):
         return self.dice_weight * dice_loss + self.focal_weight * focal_loss
 
 
+# def calculate_class_weights(dataset):
+#     """
+#     Calculate class weights based on class frequencies with safeguards
+#     """
+#     class_counts = torch.zeros(NUM_CLASSES)
+    
+#     # Count occurrences of each class
+#     for i, (_, mask) in enumerate(dataset):
+#         if i % 100 == 0:
+#             print(f"Processing image {i}/{len(dataset)} for class weights...")
+#         for class_idx in range(NUM_CLASSES):
+#             class_counts[class_idx] += (mask == class_idx).sum().item()
+    
+#     # Add a small epsilon to prevent division by zero for classes that may not appear
+#     epsilon = 1e-5
+#     class_counts = class_counts + epsilon
+    
+#     # Calculate weights (inverse of frequency)
+#     total_pixels = class_counts.sum()
+#     class_weights = total_pixels / (class_counts * NUM_CLASSES)
+    
+#     # Normalize weights
+#     class_weights = class_weights / class_weights.sum()
+    
+#     # Optional: Cap weights to avoid extremely high values
+#     max_weight = 10.0
+#     class_weights = torch.clamp(class_weights, max=max_weight)
+    
+#     # Move to the correct device
+#     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+#     class_weights = class_weights.to(device)
+    
+#     return class_weights
+
+# def calculate_class_weights(dataset):
+#     """
+#     Calculate class weights based on class frequencies with GPU acceleration
+#     """
+#     # Initialize counts on GPU
+#     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+#     class_counts = torch.zeros(NUM_CLASSES, device=device)
+    
+#     # Use DataLoader to batch process
+#     dataloader = torch.utils.data.DataLoader(
+#         dataset, batch_size=16, shuffle=False, num_workers=4
+#     )
+    
+#     print("Calculating class weights...")
+    
+#     # Process in batches
+#     for batch_idx, (_, masks) in enumerate(tqdm(dataloader)):
+#         # Move masks to GPU
+#         masks = masks.to(device)
+        
+#         # Count classes in batch (vectorized operation)
+#         for class_idx in range(NUM_CLASSES):
+#             class_counts[class_idx] += (masks == class_idx).sum().item()
+        
+#         # Report progress occasionally
+#         if batch_idx % 50 == 0:
+#             print(f"Processed {batch_idx * dataloader.batch_size}/{len(dataset)} images")
+    
+#     # Calculate weights (all on GPU)
+#     epsilon = 1e-5
+#     class_counts = class_counts + epsilon
+    
+#     # Calculate weights (inverse of frequency)
+#     total_pixels = class_counts.sum()
+#     class_weights = total_pixels / (class_counts * NUM_CLASSES)
+    
+#     # Normalize weights
+#     class_weights = class_weights / class_weights.sum()
+    
+#     # Cap weights to avoid extremely high values
+#     max_weight = 10.0
+#     class_weights = torch.clamp(class_weights, max=max_weight)
+    
+#     print(f"Class counts: {class_counts}")
+#     print(f"Class weights: {class_weights}")
+    
+#     return class_weights
+
+
 def calculate_class_weights(dataset):
     """
-    Calculate class weights based on class frequencies with safeguards
+    Calculate class weights based on class frequencies with optimized GPU acceleration
     """
-    class_counts = torch.zeros(NUM_CLASSES)
+    # Use a larger batch size to better utilize GPU
+    batch_size = 64
     
-    # Count occurrences of each class
-    for i, (_, mask) in enumerate(dataset):
-        if i % 100 == 0:
-            print(f"Processing image {i}/{len(dataset)} for class weights...")
-        for class_idx in range(NUM_CLASSES):
-            class_counts[class_idx] += (mask == class_idx).sum().item()
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    class_counts = torch.zeros(NUM_CLASSES, device=device)
     
-    # Add a small epsilon to prevent division by zero for classes that may not appear
+    # Use DataLoader with more workers and larger batches
+    dataloader = torch.utils.data.DataLoader(
+        dataset, batch_size=batch_size, shuffle=False, 
+        num_workers=4, pin_memory=True, drop_last=False
+    )
+    
+    print("Calculating class weights using GPU acceleration...")
+    
+    # Process in batches, keeping everything on GPU
+    with torch.cuda.amp.autocast():  # Use mixed precision for faster processing
+        for batch_idx, (_, masks) in enumerate(tqdm(dataloader)):
+            # Move masks to GPU and keep as tensor (don't convert to numpy)
+            masks = masks.to(device)
+            
+            # Create one-hot encoding on GPU (more GPU-intensive operation)
+            for class_idx in range(NUM_CLASSES):
+                # This is a more GPU-intensive way to count
+                class_mask = (masks == class_idx).to(device)
+                class_counts[class_idx] += class_mask.sum()
+                
+                # Explicitly free memory
+                del class_mask
+                torch.cuda.empty_cache()
+    
+    # Calculate weights (all operations on GPU)
     epsilon = 1e-5
     class_counts = class_counts + epsilon
+    
+    # Print absolute counts
+    print(f"Class pixel counts: {class_counts}")
     
     # Calculate weights (inverse of frequency)
     total_pixels = class_counts.sum()
@@ -125,12 +233,10 @@ def calculate_class_weights(dataset):
     # Normalize weights
     class_weights = class_weights / class_weights.sum()
     
-    # Optional: Cap weights to avoid extremely high values
+    # Cap weights to avoid extremely high values
     max_weight = 10.0
     class_weights = torch.clamp(class_weights, max=max_weight)
     
-    # Move to the correct device
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    class_weights = class_weights.to(device)
+    print(f"Class weights: {class_weights}")
     
     return class_weights
