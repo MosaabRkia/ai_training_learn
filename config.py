@@ -42,12 +42,12 @@ EARLY_STOPPING_PATIENCE = 10
 # ✅ Batch Size & Learning Rate
 BATCH_SIZE_MIN = 1
 BATCH_SIZE_MAX = 2
-DEFAULT_BATCH_SIZE = 4
+DEFAULT_BATCH_SIZE = 2
 DEFAULT_LEARNING_RATE = 0.0001
 
 # # ✅ Image Resolution
-TRAIN_IMAGE_WIDTH = 768  # Half of original 768
-TRAIN_IMAGE_HEIGHT = 1024  # Half of original 1024
+TRAIN_IMAGE_WIDTH = 384  # Half of original 768
+TRAIN_IMAGE_HEIGHT = 512  # Half of original 1024
 
 # ✅ Automatic Optimization & Recovery
 autoRecover = True
