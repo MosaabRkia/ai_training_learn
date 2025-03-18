@@ -18,7 +18,7 @@ from config import CLASS_MAPPING, NUM_CLASSES
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Test model on validation or test dataset")
-    parser.add_argument("--model", type=str, default="models/best_model.pth", 
+    parser.add_argument("--model", type=str, default="models/checkpoint_epoch4.pth", 
                         help="Path to model checkpoint")
     parser.add_argument("--img-dir", type=str, default="data/val/images", 
                         help="Directory containing images")
@@ -26,7 +26,7 @@ def parse_args():
                         help="Directory containing ground truth outputs")
     parser.add_argument("--output", type=str, default="testResults/", 
                         help="Output directory for results")
-    parser.add_argument("--batch-size", type=int, default=4, 
+    parser.add_argument("--batch-size", type=int, default=32, 
                         help="Batch size for testing")
     parser.add_argument("--architecture", type=str, default="deeplabv3plus", 
                         help="Model architecture")

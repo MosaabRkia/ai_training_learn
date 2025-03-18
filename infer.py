@@ -17,7 +17,7 @@ from config import CLASS_MAPPING, TRAIN_IMAGE_WIDTH, TRAIN_IMAGE_HEIGHT
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Run inference on images")
-    parser.add_argument("--model", type=str, default="models/best_model.pth", 
+    parser.add_argument("--model", type=str, default="models/checkpoint_epoch4.pth", 
                         help="Path to model checkpoint")
     parser.add_argument("--input", type=str, default="data/test/", 
                         help="Input directory containing images")

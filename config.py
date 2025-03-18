@@ -1,14 +1,15 @@
 # ✅ Training Configuration
-trainingFromScratch = True
+trainingFromScratch = False
 selfFixOptimization = True
 useMaskForTraining = True
+DefineAugmentations = False  # Set to True to enable data augmentation
 
 # ✅ GPU & Precision Settings
 useMultiGPU = False
 precisionMode = "fp32"  # Change to "fp32" from "fp16" to avoid precision issues
 
 # ✅ Model & Training Parameters
-MODEL_NAME = "models/checkpoint_epoch50.pth"
+MODEL_NAME = "models/best_model.pth"
 BEST_MODEL_PATH = "models/best_model.pth"
 LOG_DIR = "logs/"
 NUM_CLASSES = 6  # 5 garment part classes + background (class 0)
@@ -42,7 +43,7 @@ EARLY_STOPPING_PATIENCE = 10
 # ✅ Batch Size & Learning Rate
 BATCH_SIZE_MIN = 1
 BATCH_SIZE_MAX = 2
-DEFAULT_BATCH_SIZE = 4
+DEFAULT_BATCH_SIZE = 32
 DEFAULT_LEARNING_RATE = 0.0001
 
 # # ✅ Image Resolution

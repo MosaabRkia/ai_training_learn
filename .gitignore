@@ -5,4 +5,8 @@ venv
 *.pth
 logs
 *.pyc
-utils/__pycache__
+utils/__pycache__/*
+testResults
+__pycache__/
+*.png
+*.jpg

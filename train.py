@@ -104,9 +104,9 @@ def train(args):
     optimizer = optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=1e-4)
     
     # Create a learning rate scheduler
-    scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, mode='min', factor=0.5, patience=5, verbose=True
-    )
+    scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=10, gamma=0.1)
+    print("Current LR:", scheduler.get_last_lr())  # Instead of using verbose=True
+
     
     # ✅ Initialize Loss Function with Class Weights
     class_weights = calculate_class_weights(train_loader.dataset)

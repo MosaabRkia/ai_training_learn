@@ -3,7 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from config import NUM_CLASSES
 from tqdm import tqdm
-
+import os
 class DiceLoss(nn.Module):
     """
     Dice Loss for multi-class segmentation
@@ -183,60 +183,55 @@ class CombinedLoss(nn.Module):
 #     print(f"Class weights: {class_weights}")
     
 #     return class_weights
+CLASS_WEIGHTS_FILE = "class_weights.pth"  # File to store class weights
 
 
 def calculate_class_weights(dataset):
     """
-    Calculate class weights based on class frequencies with optimized GPU acceleration
+    Calculate and save class weights based on class frequencies with optimized GPU acceleration.
+    If class weights exist, load them instead of recomputing.
     """
-    # Use a larger batch size to better utilize GPU
-    batch_size = 64
-    
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    # Check if the class weights file exists
+    if os.path.exists(CLASS_WEIGHTS_FILE):
+        print("Loading precomputed class weights...")
+        class_weights = torch.load(CLASS_WEIGHTS_FILE, map_location=device)
+        return class_weights
+
+    print("Class weights not found. Computing class weights...")
+
+    # Compute class weights if not found
+    batch_size = 64
     class_counts = torch.zeros(NUM_CLASSES, device=device)
-    
-    # Use DataLoader with more workers and larger batches
+
     dataloader = torch.utils.data.DataLoader(
         dataset, batch_size=batch_size, shuffle=False, 
         num_workers=4, pin_memory=True, drop_last=False
     )
-    
+
     print("Calculating class weights using GPU acceleration...")
-    
-    # Process in batches, keeping everything on GPU
-    with torch.cuda.amp.autocast():  # Use mixed precision for faster processing
-        for batch_idx, (_, masks) in enumerate(tqdm(dataloader)):
-            # Move masks to GPU and keep as tensor (don't convert to numpy)
+
+    with torch.amp.autocast("cuda"):  # Use mixed precision for faster processing
+        for _, masks in tqdm(dataloader):
             masks = masks.to(device)
-            
-            # Create one-hot encoding on GPU (more GPU-intensive operation)
             for class_idx in range(NUM_CLASSES):
-                # This is a more GPU-intensive way to count
                 class_mask = (masks == class_idx).to(device)
                 class_counts[class_idx] += class_mask.sum()
-                
-                # Explicitly free memory
-                del class_mask
+                del class_mask  # Free memory
                 torch.cuda.empty_cache()
-    
-    # Calculate weights (all operations on GPU)
+
     epsilon = 1e-5
-    class_counts = class_counts + epsilon
-    
-    # Print absolute counts
-    print(f"Class pixel counts: {class_counts}")
-    
-    # Calculate weights (inverse of frequency)
+    class_counts += epsilon
     total_pixels = class_counts.sum()
     class_weights = total_pixels / (class_counts * NUM_CLASSES)
-    
-    # Normalize weights
-    class_weights = class_weights / class_weights.sum()
-    
-    # Cap weights to avoid extremely high values
-    max_weight = 10.0
-    class_weights = torch.clamp(class_weights, max=max_weight)
-    
-    print(f"Class weights: {class_weights}")
-    
+    class_weights /= class_weights.sum()
+    class_weights = torch.clamp(class_weights, max=10.0)
+
+    print(f"Computed Class Weights: {class_weights}")
+
+    # Save class weights to file
+    torch.save(class_weights, CLASS_WEIGHTS_FILE)
+    print(f"Class weights saved to {CLASS_WEIGHTS_FILE}")
+
     return class_weights
