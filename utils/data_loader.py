@@ -1,3 +1,4 @@
+# data_loader.py
 import torch
 import cv2
 import os
@@ -10,7 +11,8 @@ from config import (
     TRAIN_IMAGE_WIDTH, 
     TRAIN_IMAGE_HEIGHT,
     CLASS_MAPPING,
-    precisionMode
+    precisionMode,
+    NUM_CLASSES
 )
 
 # ✅ Define RGB to Class Index Mapping Function
@@ -36,6 +38,35 @@ def rgb_to_mask(mask_rgb, class_mapping):
         
     return mask
 
+# ✅ Define improved binary mask conversion function
+def rgb_to_binary_mask(mask_rgb, class_mapping):
+    """
+    Convert RGB mask to binary mask (0=background, 1=hand)
+    More robust to slight color variations in the mask
+    
+    Args:
+        mask_rgb: RGB mask image (H, W, 3)
+        class_mapping: Dictionary mapping class indices to RGB values
+        
+    Returns:
+        mask: Binary mask (H, W) where 0=background, 1=hand
+    """
+    height, width = mask_rgb.shape[:2]
+    mask = np.zeros((height, width), dtype=np.uint8)
+    
+    # Get the hand color (class 1)
+    hand_color = np.array(class_mapping[1])
+    
+    # Calculate color difference to handle slight variations in the hand mask
+    # This is more robust than exact color matching
+    color_diff = np.sum(np.abs(mask_rgb.astype(np.int32) - hand_color), axis=2)
+    
+    # Threshold the difference to create binary mask
+    # Allowing some tolerance for color variations
+    mask[color_diff < 30] = 1  # Pixels close to hand color become 1
+    
+    return mask
+
 # ✅ Define Class Index to RGB Mapping Function
 def mask_to_rgb(mask, class_mapping):
     """
@@ -59,14 +90,25 @@ def mask_to_rgb(mask, class_mapping):
         
     return mask_rgb
 
-# ✅ Define Augmentations
+# Define separate augmentations
+augmentations = [
+    ("vertical_flip", A.Compose([
+        A.VerticalFlip(p=1.0)
+    ], additional_targets={'output': 'image'})),
+    
+    ("HorizontalFlip", A.Compose([
+        A.HorizontalFlip(p=1.0),
+    ], additional_targets={'output': 'image'})),
+
+    ("HorizontalFlip_and_vertical_flip", A.Compose([
+        A.HorizontalFlip(p=1.0),
+        A.VerticalFlip(p=1.0)
+    ], additional_targets={'output': 'image'})),
+]
+
+# Main transform just includes resizing and conversion to tensor
 train_transform = A.Compose([
-    # A.Resize(TRAIN_IMAGE_HEIGHT, TRAIN_IMAGE_WIDTH),
-    A.HorizontalFlip(p=0.5),
-    A.RandomBrightnessContrast(p=0.3),
-    A.Affine(scale=(0.95, 1.05), translate_percent=(0.05, 0.05), rotate=(-15, 15), p=0.5),
-    A.HueSaturationValue(hue_shift_limit=10, sat_shift_limit=15, val_shift_limit=10, p=0.3),
-    A.GaussianBlur(blur_limit=(3, 5), p=0.1),
+    A.Resize(TRAIN_IMAGE_HEIGHT, TRAIN_IMAGE_WIDTH),
     ToTensorV2()
 ])
 
@@ -76,7 +118,7 @@ val_transform = A.Compose([
 ])
 
 class GarmentDataset(Dataset):
-    """Dataset class for garment segmentation."""
+    """Dataset class for hand segmentation."""
     def __init__(self, img_dir, mask_dir=None, output_dir=None, transform=None, is_test=False):
         self.img_dir = img_dir
         self.mask_dir = mask_dir
@@ -135,24 +177,54 @@ class GarmentDataset(Dataset):
         
         # Load mask/label - prioritize output segmentations if available
         if self.output_dir and len(self.output_list) > 0:
-            output_path = os.path.join(self.output_dir, self.output_list[idx])
-            mask_rgb = cv2.imread(output_path)
-            mask_rgb = cv2.cvtColor(mask_rgb, cv2.COLOR_BGR2RGB)
-            mask = rgb_to_mask(mask_rgb, CLASS_MAPPING)
-        elif self.use_mask:
+            mask_path = os.path.join(self.output_dir, self.output_list[idx])
+        elif self.use_mask and len(self.mask_list) > 0:
             # Use mask as alternative ground truth
             mask_path = os.path.join(self.mask_dir, self.mask_list[idx])
-            mask_rgb = cv2.imread(mask_path)
-            mask_rgb = cv2.cvtColor(mask_rgb, cv2.COLOR_BGR2RGB)
-            mask = rgb_to_mask(mask_rgb, CLASS_MAPPING)
         else:
             # Create empty mask if neither is available
             mask = np.zeros((image.shape[0], image.shape[1]), dtype=np.uint8)
+            
+            # Apply transformations
+            if self.transform:
+                augmented = self.transform(image=image, mask=mask)
+                img_tensor = augmented['image'].float() / 255.0
+                return img_tensor, augmented['mask'].long()
+            
+            # Manual conversion without augmentation
+            img_tensor = torch.from_numpy(image.transpose(2, 0, 1)).float() / 255.0
+            mask_tensor = torch.from_numpy(mask).long()
+            return img_tensor, mask_tensor
         
-        # Apply transformations
+        # Load and process mask for training
+        mask_rgb = cv2.imread(mask_path)
+        mask_rgb = cv2.cvtColor(mask_rgb, cv2.COLOR_BGR2RGB)
+        
+        # Use the improved binary mask conversion for hand segmentation
+        if NUM_CLASSES == 2:  # Binary segmentation (background + hand)
+            mask = rgb_to_binary_mask(mask_rgb, CLASS_MAPPING)
+        else:
+            # Use the original function for multi-class cases
+            mask = rgb_to_mask(mask_rgb, CLASS_MAPPING)
+        
+        # Randomly select an augmentation with 50% probability
+        import random
+        if random.random() < 0.5 and len(augmentations) > 0:
+            # Choose a random augmentation
+            aug_name, augmentation = random.choice(augmentations)
+            augmented = augmentation(image=image, output=mask_rgb)
+            image = augmented['image']
+            mask_rgb = augmented['output']
+            
+            # Re-process the augmented mask
+            if NUM_CLASSES == 2:
+                mask = rgb_to_binary_mask(mask_rgb, CLASS_MAPPING)
+            else:
+                mask = rgb_to_mask(mask_rgb, CLASS_MAPPING)
+        
+        # Apply basic transformations (resize and convert to tensor)
         if self.transform:
             augmented = self.transform(image=image, mask=mask)
-            # Ensure proper data type for model input
             img_tensor = augmented['image'].float() / 255.0
             return img_tensor, augmented['mask'].long()
         

@@ -1,3 +1,4 @@
+# test.py
 import torch
 import os
 import cv2
@@ -12,15 +13,15 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 # Import local modules
 from utils.model import load_model
-from utils.data_loader import get_val_dataloader, rgb_to_mask
-from utils.visualization import visualize_prediction, create_confusion_visualization
+from utils.data_loader import get_val_dataloader, rgb_to_mask, rgb_to_binary_mask
+from utils.visualization import visualize_prediction, create_confusion_visualization, visualize_hand_segmentation_metrics
 from config import CLASS_MAPPING, NUM_CLASSES
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Test model on validation or test dataset")
-    parser.add_argument("--model", type=str, default="models/checkpoint_epoch4.pth", 
+    parser.add_argument("--model", type=str, default="models/best_model.pth", 
                         help="Path to model checkpoint")
-    parser.add_argument("--img-dir", type=str, default="data/val/images", 
+    parser.add_argument("--img-dir", type=str, default="data/test", 
                         help="Directory containing images")
     parser.add_argument("--output-dir", type=str, default="data/val/outputs", 
                         help="Directory containing ground truth outputs")
@@ -28,9 +29,9 @@ def parse_args():
                         help="Output directory for results")
     parser.add_argument("--batch-size", type=int, default=32, 
                         help="Batch size for testing")
-    parser.add_argument("--architecture", type=str, default="deeplabv3plus", 
+    parser.add_argument("--architecture", type=str, default="unet", 
                         help="Model architecture")
-    parser.add_argument("--encoder", type=str, default="resnet50", 
+    parser.add_argument("--encoder", type=str, default="efficientnet-b2", 
                         help="Encoder backbone")
     return parser.parse_args()
 
@@ -99,18 +100,25 @@ def main(args):
                     class_intersection[class_idx] += intersection
                     class_union[class_idx] += union
                 
-                # Create visualization
-                if batch_idx < 10:  # Save visualizations for first 10 batches
+                # Create visualizations - save more for binary segmentation to better evaluate hands
+                if batch_idx < 20:  # Save visualizations for first 20 batches
                     img = images[i].cpu()
+                    
+                    # Basic visualization
                     vis = visualize_prediction(img, mask, pred)
-                    confusion_vis = create_confusion_visualization(img, mask, pred)
-                    
-                    # Save visualizations
                     vis_path = os.path.join(args.output, f"vis_batch{batch_idx}_sample{i}.png")
-                    conf_path = os.path.join(args.output, f"conf_batch{batch_idx}_sample{i}.png")
-                    
                     cv2.imwrite(vis_path, cv2.cvtColor(vis, cv2.COLOR_RGB2BGR))
+                    
+                    # Confusion visualization
+                    confusion_vis = create_confusion_visualization(img, mask, pred)
+                    conf_path = os.path.join(args.output, f"conf_batch{batch_idx}_sample{i}.png")
                     cv2.imwrite(conf_path, cv2.cvtColor(confusion_vis, cv2.COLOR_RGB2BGR))
+                    
+                    # For binary segmentation, add specialized hand segmentation metrics visualization
+                    if NUM_CLASSES == 2:
+                        hand_metrics_vis = visualize_hand_segmentation_metrics(img, mask, pred)
+                        metrics_vis_path = os.path.join(args.output, f"hand_metrics_batch{batch_idx}_sample{i}.png")
+                        cv2.imwrite(metrics_vis_path, cv2.cvtColor(hand_metrics_vis, cv2.COLOR_RGB2BGR))
     
     # Calculate IoU for each class
     epsilon = 1e-10  # Small constant to avoid division by zero
@@ -134,15 +142,21 @@ def main(args):
     print("\n📊 Test Results:")
     print(f"Mean IoU: {class_iou.mean():.4f}")
     
-    # Print class-wise metrics
-    class_names = {
-        0: "Background",
-        1: "Left Arm",
-        2: "Right Arm",
-        3: "Chest/Middle",
-        4: "Collar (Front)",
-        5: "Body Back Parts"
-    }
+    # Define class names based on binary segmentation for hands
+    if NUM_CLASSES == 2:
+        class_names = {
+            0: "Background",
+            1: "Hand"
+        }
+    else:
+        class_names = {
+            0: "Background",
+            1: "Left Arm",
+            2: "Right Arm",
+            3: "Chest/Middle",
+            4: "Collar (Front)",
+            5: "Body Back Parts"
+        }
     
     print("\nClass-wise metrics:")
     print(f"{'Class':<15} {'IoU':<10} {'Precision':<10} {'Recall':<10} {'F1 Score':<10}")
@@ -161,6 +175,33 @@ def main(args):
         
         for i in range(NUM_CLASSES):
             f.write(f"{class_names.get(i, f'Class {i}'):<15} {class_iou[i]:.4f}    {precision[i]:.4f}     {recall[i]:.4f}     {f1_score[i]:.4f}\n")
+    
+    # For binary segmentation, calculate additional hand-specific metrics
+    if NUM_CLASSES == 2:
+        # Calculate hand detection rate (what percentage of images with hands are detected correctly)
+        hand_detection_rate = 0
+        images_with_hands = 0
+        
+        for i in range(NUM_CLASSES):
+            row_sum = confusion[i, :].sum()
+            if row_sum > 0:  # If there are any true samples for this class
+                class_accuracy = confusion[i, i] / row_sum
+                if i == 1:  # Hand class
+                    hand_detection_rate = class_accuracy
+                    images_with_hands = row_sum
+        
+        # Append hand-specific metrics to the file
+        with open(metrics_path, "a") as f:
+            f.write("\n\nHand Segmentation Specific Metrics:\n")
+            f.write(f"Hand Detection Rate: {hand_detection_rate:.4f}\n")
+            f.write(f"Total Images with Hands: {images_with_hands}\n")
+            f.write(f"Hand IoU: {class_iou[1]:.4f}\n")
+            f.write(f"Hand Precision: {precision[1]:.4f}\n")
+            f.write(f"Hand Recall: {recall[1]:.4f}\n")
+        
+        print("\nHand Segmentation Specific Metrics:")
+        print(f"Hand Detection Rate: {hand_detection_rate:.4f}")
+        print(f"Total Images with Hands: {images_with_hands}")
     
     print(f"\n✅ Test complete! Results saved to {args.output}")
 

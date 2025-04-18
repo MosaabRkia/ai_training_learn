@@ -9,3 +9,6 @@ scikit-learn>=0.24.0
 matplotlib>=3.3.0
 tensorboard>=2.4.0
 Pillow>=8.0.0
+
+
+python infer.py --model models/best_model.pth --input data/test/ --output testResults/ --visualize

@@ -4,7 +4,50 @@ import albumentations as A
 import matplotlib.pyplot as plt
 import os
 import random
+from sklearn.cluster import KMeans
 from config import TRAIN_IMAGE_HEIGHT, TRAIN_IMAGE_WIDTH, TRAIN_IMG_DIR, TRAIN_OUTPUT_DIR
+
+def get_dominant_bg_color(image, k=3):
+    """
+    Detects the dominant background color using KMeans clustering.
+    """
+    pixels = image.reshape((-1, 3))  # Reshape to a list of pixels
+
+    # Ensure K is not larger than the number of unique colors
+    unique_colors = np.unique(pixels, axis=0)
+    k = min(k, len(unique_colors))  # Reduce K if needed
+
+    if k <= 1:
+        return tuple(map(int, unique_colors[0]))  # If one unique color, return it
+
+    # Apply KMeans
+    try:
+        kmeans = KMeans(n_clusters=k, random_state=0, n_init=10)
+        kmeans.fit(pixels)
+        dominant_color = kmeans.cluster_centers_[kmeans.labels_[0]]  # Most common color
+        return tuple(map(int, dominant_color))  # Convert to tuple of integers
+    except Exception as e:
+        print(f"Error in KMeans clustering: {e}")
+        return (255, 255, 255)  # Default to white if clustering fails
+
+
+def replace_black_with_bg(augmented_image, bg_color, tolerance=5):
+    """
+    Replace black pixels (or near black within tolerance) with the background color.
+    """
+    # Convert image to NumPy array if not already
+    augmented_image = np.array(augmented_image, dtype=np.uint8)
+    
+    # Create a mask for nearly black pixels within the tolerance range
+    mask = (augmented_image[..., 0] <= tolerance) & \
+           (augmented_image[..., 1] <= tolerance) & \
+           (augmented_image[..., 2] <= tolerance)
+
+    # Replace black (or near black) pixels with the detected background color
+    augmented_image[mask] = bg_color
+    
+    return augmented_image
+
 
 def visualize_augmentations(output_dir="augmentation_results"):
     # Create output directory if it doesn't exist
@@ -36,119 +79,38 @@ def visualize_augmentations(output_dir="augmentation_results"):
     # Read the output/mask
     output = None
     if output_path:
-        output = cv2.imread(output_path)  # Keep the output mask as-is
+        output = cv2.imread(output_path)
+        if output is not None:
+            output = cv2.cvtColor(output, cv2.COLOR_BGR2RGB)  # Convert to RGB
     
     # Original dimensions for reference
     original_height, original_width = image.shape[:2]
     print(f"Original image dimensions: {original_width}x{original_height}")
 
-    # Augmentations including fixed MotionBlur (blur_limit=(3, 9))
+    # Detect background color from the original image
+    bg_color = get_dominant_bg_color(image)
+    print(f"Detected background color: {bg_color}")
+
+    # Ensure consistent augmentation by using the same transforms for inputs and outputs
+    # And make sure they maintain the original dimensions
     augmentations = [
-
-        ("Rotate & Shear & Zoom & Blur & Noise & Brightness & Contrast", A.Compose([
-            A.Affine(rotate=(-40, 40), shear=(-25, 25), scale=(0.7, 1.3), cval=246, p=1.0),
-            A.GaussianBlur(blur_limit=(5, 9), p=0.8),
-            A.ISONoise(color_shift=(0.02, 0.08), intensity=(0.2, 0.5), p=0.7),
-            A.RandomBrightnessContrast(brightness_limit=0.5, contrast_limit=0.5, p=0.7),
-            A.MotionBlur(blur_limit=10, p=0.8, centered=False),
-            A.HueSaturationValue(hue_shift_limit=15, sat_shift_limit=30, val_shift_limit=20, p=0.8),
-            A.CoarseDropout(max_holes=10, max_height=20, max_width=20, p=0.8)
-        ])),
-
-        ("Elastic & Grid Distortion & Brightness & Sharpen & Flip & Solarize & Invert", A.Compose([
-            A.ElasticTransform(alpha=3, sigma=60, alpha_affine=60, p=1.0),
-            A.GridDistortion(num_steps=6, distort_limit=0.4, p=0.8),
-            A.RandomBrightnessContrast(brightness_limit=0.5, contrast_limit=0.5, p=0.7),
-            A.Sharpen(alpha=(0.3, 0.7), lightness=(0.6, 1.2), p=0.7),
-            A.VerticalFlip(p=0.7),
-            A.Solarize(threshold=100, p=0.8),
-            A.InvertImg(p=0.7)
-        ])),
-
-        ("Flip & Solarize & Noise & Scale & Rotate & Dropout & Equalize", A.Compose([
+        ("vertical_flip", A.Compose([
+            A.VerticalFlip(p=1.0)
+        ], additional_targets={'output': 'image'})),
+        
+        ("HorizontalFlip", A.Compose([
             A.HorizontalFlip(p=1.0),
-            A.Solarize(threshold=110, p=0.9),
-            A.ISONoise(color_shift=(0.03, 0.07), intensity=(0.3, 0.6), p=0.7),
-            A.RandomScale(scale_limit=0.3, p=0.7),
-            A.Rotate(limit=35, p=0.8),
-            A.PixelDropout(dropout_prob=0.15, per_channel=True, p=0.8),
-            A.Equalize(mode='cv', by_channels=True, p=0.8)
-        ])),
+        ], additional_targets={'output': 'image'})),
 
-        ("Affine & Defocus & Sharpen & Contrast & Pixel Dropout & Translate & Color Jitter", A.Compose([
-            A.Affine(scale=(0.85, 1.15), rotate=(-20, 20), shear=(-10, 10), cval=246, p=1.0),
-            A.Defocus(radius=(5, 9), p=0.8),
-            A.Sharpen(alpha=(0.3, 0.7), lightness=(0.6, 1.2), p=0.8),
-            A.RandomBrightnessContrast(brightness_limit=0.4, contrast_limit=0.4, p=0.7),
-            A.PixelDropout(dropout_prob=0.15, per_channel=True, p=0.8),
-            A.ShiftScaleRotate(shift_limit=0.05, scale_limit=0.2, rotate_limit=15, p=0.8),
-            A.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.1, p=0.7)
-        ])),
-
-        ("Rotate & Flip & Grid Distortion & Noise & Sharpen & Emboss & Perspective", A.Compose([
-            A.Rotate(limit=50, p=0.8),
-            A.HorizontalFlip(p=0.7),
-            A.GridDistortion(num_steps=6, distort_limit=0.4, p=0.8),
-            A.ISONoise(color_shift=(0.03, 0.09), intensity=(0.3, 0.6), p=0.7),
-            A.Sharpen(alpha=(0.4, 0.8), lightness=(0.7, 1.3), p=0.7),
-            A.Emboss(alpha=(0.2, 0.6), strength=(0.3, 1.0), p=0.8),
-            A.Perspective(scale=(0.05, 0.15), p=0.7)
-        ])),
-
-        ("Elastic & Scale & Motion Blur & Contrast & Solarize & Cutout & Jitter", A.Compose([
-            A.ElasticTransform(alpha=4, sigma=70, alpha_affine=70, p=1.0),
-            A.RandomScale(scale_limit=0.35, p=0.7),
-            A.MotionBlur(blur_limit=10, p=0.8),
-            A.RandomBrightnessContrast(brightness_limit=0.6, contrast_limit=0.6, p=0.7),
-            A.Solarize(threshold=120, p=0.8),
-            A.CoarseDropout(max_holes=5, max_height=20, max_width=20, p=0.7),
-            A.ColorJitter(brightness=0.3, contrast=0.3, saturation=0.3, hue=0.1, p=0.7)
-        ])),
-
-        ("Perspective & Cutout & Noise & Blur & Sharpen & Flip & Pixel Dropout", A.Compose([
-            A.Perspective(scale=(0.05, 0.15), p=0.9),
-            A.CoarseDropout(max_holes=8, max_height=32, max_width=32, min_height=10, min_width=10, p=0.8),
-            A.ISONoise(color_shift=(0.02, 0.08), intensity=(0.3, 0.6), p=0.7),
-            A.GaussianBlur(blur_limit=7, p=0.7),
-            A.Sharpen(alpha=(0.3, 0.6), lightness=(0.7, 1.2), p=0.8),
-            A.HorizontalFlip(p=0.8),
-            A.PixelDropout(dropout_prob=0.1, per_channel=True, p=0.8)
-        ])),
-
-        ("Invert & Flip & Scale & Defocus & Contrast & Shear & Brightness", A.Compose([
-            A.InvertImg(p=1.0),
-            A.HorizontalFlip(p=0.8),
-            A.RandomScale(scale_limit=0.4, p=0.7),
-            A.Defocus(radius=(3, 7), p=0.8),
-            A.RandomBrightnessContrast(brightness_limit=0.5, contrast_limit=0.5, p=0.7),
-            A.Affine(shear=(-15, 15), cval=255, p=1.0),
-            A.HueSaturationValue(hue_shift_limit=10, sat_shift_limit=20, val_shift_limit=15, p=0.8)
-        ])),
-
-        ("Jitter & Translate & Rotate & Dropout & Blur & Elastic & Noise", A.Compose([
-            A.ColorJitter(brightness=0.3, contrast=0.3, saturation=0.3, hue=0.1, p=0.8),
-            A.ShiftScaleRotate(shift_limit=0.05, scale_limit=0.2, rotate_limit=30, p=0.9),
-            A.PixelDropout(dropout_prob=0.1, per_channel=True, p=0.7),
-            A.MotionBlur(blur_limit=8, p=0.7),
-            A.ElasticTransform(alpha=2, sigma=50, alpha_affine=50, p=0.8),
-            A.ISONoise(color_shift=(0.02, 0.07), intensity=(0.3, 0.6), p=0.7),
-            A.RandomBrightnessContrast(brightness_limit=0.4, contrast_limit=0.4, p=0.7)
-        ])),
-
-        ("Equalize & Flip & Zoom & Shear & Noise & Solarize & Perspective", A.Compose([
-            A.Equalize(mode='cv', by_channels=True, p=0.8),
-            A.VerticalFlip(p=0.7),
-            A.Affine(scale=(0.75, 1.25), shear=(-15, 15), cval=255, p=1.0),
-            A.ISONoise(color_shift=(0.03, 0.08), intensity=(0.4, 0.6), p=0.7),
-            A.Solarize(threshold=130, p=0.8),
-            A.Perspective(scale=(0.03, 0.12), p=0.7),
-            A.MotionBlur(blur_limit=10, p=0.8, centered=False)
-        ]))
+        ("HorizontalFlip_and_vertical_flip", A.Compose([
+            A.HorizontalFlip(p=1.0),
+            A.VerticalFlip(p=1.0)
+        ], additional_targets={'output': 'image'})),
     ]
 
     # Create grid of images
     num_augmentations = len(augmentations)
-    rows = num_augmentations + 2  # Original + individual + mixed
+    rows = num_augmentations + 1  # Original + individual augmentations
     cols = 2 if output is not None else 1  # Input and output if available
     
     plt.figure(figsize=(cols*6, rows*6))
@@ -166,18 +128,59 @@ def visualize_augmentations(output_dir="augmentation_results"):
         plt.title("Original Output")
         plt.axis("off")
     
+    # Set a seed for consistent results
+    random.seed(42)
+    np.random.seed(42)
+    
+    # Create a directory for individual augmented images
+    augmented_images_dir = os.path.join(output_dir, "individual_images")
+    os.makedirs(augmented_images_dir, exist_ok=True)
+    
     for i, (name, transform) in enumerate(augmentations):
-        augmented = transform(image=image, mask=output if output is not None else image)
+        # Create a dictionary with inputs for augmentation
+        aug_data = {"image": image}
+        
+        # Add output to augmentation if available
+        if output is not None:
+            aug_data["output"] = output
+        
+        # Apply the augmentations
+        augmented = transform(**aug_data)
+        
+        # Get the augmented input and apply background replacement
         augmented_input = augmented["image"]
-        augmented_output = augmented["mask"] if output is not None else None
-
-        plt.subplot(rows, cols, (i+1)*cols + 1)
+        augmented_input = replace_black_with_bg(augmented_input, bg_color)
+        
+        # Get the augmented output but DON'T replace background color (keep black)
+        if output is not None:
+            augmented_output = augmented["output"]
+            # Do not apply color changes to output/mask - only geometric transformations
+        else:
+            augmented_output = None
+        
+        # Save individual augmented images with original dimensions
+        input_filename = f"augmented_input_{name}.png"
+        cv2.imwrite(
+            os.path.join(augmented_images_dir, input_filename),
+            cv2.cvtColor(augmented_input, cv2.COLOR_RGB2BGR)
+        )
+        
+        if augmented_output is not None:
+            output_filename = f"augmented_output_{name}.png"
+            cv2.imwrite(
+                os.path.join(augmented_images_dir, output_filename),
+                cv2.cvtColor(augmented_output, cv2.COLOR_RGB2BGR)
+            )
+        
+        # Display augmented input in the grid visualization
+        plt.subplot(rows, cols, (i+2)*cols - 1)
         plt.imshow(augmented_input)
         plt.title(f"Input: {name}")
         plt.axis("off")
         
-        if output is not None:
-            plt.subplot(rows, cols, (i+1)*cols + 2)
+        # Display augmented output if available
+        if augmented_output is not None:
+            plt.subplot(rows, cols, (i+2)*cols)
             plt.imshow(augmented_output)
             plt.title(f"Output: {name}")
             plt.axis("off")
@@ -188,6 +191,7 @@ def visualize_augmentations(output_dir="augmentation_results"):
     plt.close()
     
     print(f"Augmentation visualizations saved to {output_dir}")
+    print(f"Individual augmented images saved to {augmented_images_dir} with original dimensions ({original_width}x{original_height})")
 
 if __name__ == "__main__":
     visualize_augmentations()

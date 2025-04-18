@@ -1,9 +1,11 @@
+# loss_functions.py
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from config import NUM_CLASSES
 from tqdm import tqdm
 import os
+
 class DiceLoss(nn.Module):
     """
     Dice Loss for multi-class segmentation
@@ -102,88 +104,56 @@ class CombinedLoss(nn.Module):
         return self.dice_weight * dice_loss + self.focal_weight * focal_loss
 
 
-# def calculate_class_weights(dataset):
-#     """
-#     Calculate class weights based on class frequencies with safeguards
-#     """
-#     class_counts = torch.zeros(NUM_CLASSES)
-    
-#     # Count occurrences of each class
-#     for i, (_, mask) in enumerate(dataset):
-#         if i % 100 == 0:
-#             print(f"Processing image {i}/{len(dataset)} for class weights...")
-#         for class_idx in range(NUM_CLASSES):
-#             class_counts[class_idx] += (mask == class_idx).sum().item()
-    
-#     # Add a small epsilon to prevent division by zero for classes that may not appear
-#     epsilon = 1e-5
-#     class_counts = class_counts + epsilon
-    
-#     # Calculate weights (inverse of frequency)
-#     total_pixels = class_counts.sum()
-#     class_weights = total_pixels / (class_counts * NUM_CLASSES)
-    
-#     # Normalize weights
-#     class_weights = class_weights / class_weights.sum()
-    
-#     # Optional: Cap weights to avoid extremely high values
-#     max_weight = 10.0
-#     class_weights = torch.clamp(class_weights, max=max_weight)
-    
-#     # Move to the correct device
-#     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-#     class_weights = class_weights.to(device)
-    
-#     return class_weights
+class BinarySegmentationLoss(nn.Module):
+    """
+    Loss function specifically designed for binary segmentation tasks like hand segmentation.
+    Combines Binary Dice Loss and Binary Cross-Entropy Loss.
+    """
+    def __init__(self, dice_weight=0.7, bce_weight=0.3, smooth=1e-5):
+        super(BinarySegmentationLoss, self).__init__()
+        self.dice_weight = dice_weight
+        self.bce_weight = bce_weight
+        self.smooth = smooth
+        
+    def forward(self, logits, targets):
+        # Get the foreground logits (class 1 - hands)
+        # For binary segmentation, we can simplify to a foreground/background problem
+        
+        # Handle multi-class logits format (B, C, H, W)
+        if logits.shape[1] > 1:
+            # Extract hand class logits
+            hand_logits = logits[:, 1:2, :, :]
+        else:
+            hand_logits = logits
+        
+        # Convert target to binary mask where 1=hand, 0=background
+        targets_binary = (targets == 1).float().unsqueeze(1)
+        
+        # Binary Dice Loss
+        probs = torch.sigmoid(hand_logits)
+        batch_size = probs.size(0)
+        
+        # Calculate binary dice loss
+        intersection = (probs * targets_binary).sum(dim=(2, 3))
+        dice_sum = probs.sum(dim=(2, 3)) + targets_binary.sum(dim=(2, 3))
+        
+        # Calculate dice coefficient and loss
+        dice_coef = (2. * intersection + self.smooth) / (dice_sum + self.smooth)
+        dice_loss = 1 - dice_coef.mean()
+        
+        # Binary Cross-Entropy Loss
+        bce_loss = F.binary_cross_entropy_with_logits(
+            hand_logits, targets_binary, reduction='none'
+        ).mean()
+        
+        # Combine losses
+        combined_loss = self.dice_weight * dice_loss + self.bce_weight * bce_loss
+        
+        return combined_loss
 
-# def calculate_class_weights(dataset):
-#     """
-#     Calculate class weights based on class frequencies with GPU acceleration
-#     """
-#     # Initialize counts on GPU
-#     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-#     class_counts = torch.zeros(NUM_CLASSES, device=device)
-    
-#     # Use DataLoader to batch process
-#     dataloader = torch.utils.data.DataLoader(
-#         dataset, batch_size=16, shuffle=False, num_workers=4
-#     )
-    
-#     print("Calculating class weights...")
-    
-#     # Process in batches
-#     for batch_idx, (_, masks) in enumerate(tqdm(dataloader)):
-#         # Move masks to GPU
-#         masks = masks.to(device)
-        
-#         # Count classes in batch (vectorized operation)
-#         for class_idx in range(NUM_CLASSES):
-#             class_counts[class_idx] += (masks == class_idx).sum().item()
-        
-#         # Report progress occasionally
-#         if batch_idx % 50 == 0:
-#             print(f"Processed {batch_idx * dataloader.batch_size}/{len(dataset)} images")
-    
-#     # Calculate weights (all on GPU)
-#     epsilon = 1e-5
-#     class_counts = class_counts + epsilon
-    
-#     # Calculate weights (inverse of frequency)
-#     total_pixels = class_counts.sum()
-#     class_weights = total_pixels / (class_counts * NUM_CLASSES)
-    
-#     # Normalize weights
-#     class_weights = class_weights / class_weights.sum()
-    
-#     # Cap weights to avoid extremely high values
-#     max_weight = 10.0
-#     class_weights = torch.clamp(class_weights, max=max_weight)
-    
-#     print(f"Class counts: {class_counts}")
-#     print(f"Class weights: {class_weights}")
-    
-#     return class_weights
+
 CLASS_WEIGHTS_FILE = "class_weights.pth"  # File to store class weights
+BINARY_CLASS_WEIGHTS_FILE = "binary_class_weights.pth"  # File for binary weights
 
 
 def calculate_class_weights(dataset):
@@ -234,4 +204,59 @@ def calculate_class_weights(dataset):
     torch.save(class_weights, CLASS_WEIGHTS_FILE)
     print(f"Class weights saved to {CLASS_WEIGHTS_FILE}")
 
+    return class_weights
+
+
+def calculate_binary_class_weights(dataset):
+    """
+    Calculate class weights optimized for binary segmentation.
+    This handles the class imbalance between background and hand pixels.
+    """
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    
+    # Check if binary class weights file exists
+    if os.path.exists(BINARY_CLASS_WEIGHTS_FILE):
+        print("Loading precomputed binary class weights...")
+        class_weights = torch.load(BINARY_CLASS_WEIGHTS_FILE, map_location=device)
+        return class_weights
+    
+    print("Computing binary class weights...")
+    
+    # For binary segmentation, we only need to count background vs. foreground
+    foreground_count = 0
+    total_pixels = 0
+    
+    dataloader = torch.utils.data.DataLoader(
+        dataset, batch_size=32, shuffle=False, 
+        num_workers=4, pin_memory=True
+    )
+    
+    print("Counting pixels for binary weights...")
+    
+    with torch.no_grad():
+        for _, masks in tqdm(dataloader):
+            # Count foreground pixels (class 1)
+            foreground_count += (masks == 1).sum().item()
+            total_pixels += masks.numel()
+    
+    # Calculate background count
+    background_count = total_pixels - foreground_count
+    
+    # Calculate class weights (background and foreground)
+    bg_weight = total_pixels / (2 * background_count + 1e-5)
+    fg_weight = total_pixels / (2 * foreground_count + 1e-5)
+    
+    # Ensure weights aren't too extreme
+    bg_weight = min(bg_weight, 3.0)
+    fg_weight = min(fg_weight, 5.0)
+    
+    # Create class weights tensor
+    class_weights = torch.tensor([bg_weight, fg_weight], device=device)
+    
+    print(f"Binary Class Weights - Background: {bg_weight:.4f}, Hand: {fg_weight:.4f}")
+    
+    # Save binary class weights
+    torch.save(class_weights, BINARY_CLASS_WEIGHTS_FILE)
+    print(f"Binary class weights saved to {BINARY_CLASS_WEIGHTS_FILE}")
+    
     return class_weights

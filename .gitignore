@@ -10,3 +10,4 @@ testResults
 __pycache__/
 *.png
 *.jpg
+augmentation_results/

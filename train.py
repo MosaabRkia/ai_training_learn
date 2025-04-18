@@ -1,3 +1,4 @@
+# train.py
 import torch
 import torch.optim as optim
 import os
@@ -15,14 +16,14 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 # Import local modules
 from utils.model import load_model
 from utils.data_loader import get_train_dataloader, get_val_dataloader
-from utils.loss_functions import CombinedLoss, calculate_class_weights
+from utils.loss_functions import CombinedLoss, calculate_class_weights, BinarySegmentationLoss, calculate_binary_class_weights
 from utils.visualization import visualize_prediction, save_colored_mask
 
 # Import config
 from config import *
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Train garment segmentation model")
+    parser = argparse.ArgumentParser(description="Train hand segmentation model")
     parser.add_argument("--batch-size", type=int, default=DEFAULT_BATCH_SIZE, 
                         help=f"Batch size (default: {DEFAULT_BATCH_SIZE})")
     parser.add_argument("--max-epochs", type=int, default=MAX_EPOCHS, 
@@ -31,11 +32,25 @@ def parse_args():
                         help=f"Learning rate (default: {DEFAULT_LEARNING_RATE})")
     parser.add_argument("--scratch", action="store_true", 
                         help="Train from scratch regardless of existing models")
-    parser.add_argument("--architecture", type=str, default="deeplabv3plus", 
-                        help="Model architecture (default: deeplabv3plus)")
-    parser.add_argument("--encoder", type=str, default="resnet50", 
-                        help="Encoder backbone (default: resnet50)")
+    parser.add_argument("--architecture", type=str, default="unet", 
+                        help="Model architecture (default: unet)")
+    parser.add_argument("--encoder", type=str, default="efficientnet-b2", 
+                        help="Encoder backbone (default: efficientnet-b2)")
     return parser.parse_args()
+
+# ✅ Helper function for binary IoU calculation
+def calculate_binary_iou(predictions, targets):
+    """Calculate IoU specifically for binary segmentation tasks"""
+    pred_mask = (predictions == 1)  # Foreground class (hands)
+    true_mask = (targets == 1)      # Foreground class (hands)
+    
+    intersection = (pred_mask & true_mask).sum().item()
+    union = (pred_mask | true_mask).sum().item()
+    
+    if union == 0:
+        return 0.0  # No foreground pixels in either prediction or target
+    
+    return intersection / union
 
 # ✅ Training Function
 def train(args):
@@ -52,6 +67,7 @@ def train(args):
     learning_rate = args.lr
     max_epochs = args.max_epochs
     best_loss = float("inf")
+    best_iou = 0.0  # Track best IoU for binary segmentation
     no_improve_epochs = 0
     checkpoint_history = []  # Stores last `maxCheckpointHistory` models
     
@@ -100,17 +116,24 @@ def train(args):
         
     print(f"⚡ Model Loaded on {device.upper()} with precision {precisionMode}")
     
-    # ✅ Optimizer & Loss Function
-    optimizer = optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=1e-4)
+    # ✅ Optimizer & Loss Function - Optimized for Binary Segmentation
+    optimizer = optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=2e-5)
     
-    # Create a learning rate scheduler
-    scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=10, gamma=0.1)
-    print("Current LR:", scheduler.get_last_lr())  # Instead of using verbose=True
+    # Better scheduler for binary segmentation tasks
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
+        optimizer, T_0=5, T_mult=2, eta_min=1e-6
+    )
+    print("Current LR:", optimizer.param_groups[0]['lr'])
 
-    
-    # ✅ Initialize Loss Function with Class Weights
-    class_weights = calculate_class_weights(train_loader.dataset)
-    loss_fn = CombinedLoss(dice_weight=0.7, focal_weight=0.3, class_weights=class_weights)
+    # ✅ Initialize Loss Function - Use specialized binary loss for hand segmentation
+    if NUM_CLASSES == 2:  # Binary segmentation (background + hand)
+        class_weights = calculate_binary_class_weights(train_loader.dataset)
+        loss_fn = BinarySegmentationLoss(dice_weight=0.7, bce_weight=0.3)
+        print("Using specialized binary segmentation loss")
+    else:
+        # Use the original combined loss for multi-class cases
+        class_weights = calculate_class_weights(train_loader.dataset)
+        loss_fn = CombinedLoss(dice_weight=0.7, focal_weight=0.3, class_weights=class_weights)
     
     print("🎯 Starting Training Loop...")
     
@@ -131,14 +154,18 @@ def train(args):
             images = images.to(device)
             masks = masks.to(device)
             
-            # Debug info
-            # if batch_idx == 0:
-            #     print(f"Image tensor shape: {images.shape}, dtype: {images.dtype}")
-            #     print(f"Mask tensor shape: {masks.shape}, dtype: {masks.dtype}")
+            # Debug info for first batch of first epoch
+            if batch_idx == 0 and epoch == 0:
+                print(f"Image tensor shape: {images.shape}, dtype: {images.dtype}")
+                print(f"Mask tensor shape: {masks.shape}, dtype: {masks.dtype}")
+                print(f"Unique mask values: {torch.unique(masks)}")
             
             optimizer.zero_grad()
             outputs = model(images)
             loss = loss_fn(outputs, masks)
+            
+            # Apply gradient clipping to prevent exploding gradients
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             
             loss.backward()
             optimizer.step()
@@ -154,14 +181,12 @@ def train(args):
         
         # Log training loss
         writer.add_scalar('Loss/train', avg_train_loss, epoch)
+        writer.add_scalar('LearningRate', optimizer.param_groups[0]['lr'], epoch)
         
         # ✅ Validate Model
         model.eval()
         total_val_loss = 0
-        
-        # Initialize metrics
-        intersection_sum = 0
-        union_sum = 0
+        mean_iou = 0
         
         print("📊 Validating Model...")
         with torch.no_grad():
@@ -172,22 +197,36 @@ def train(args):
                 loss = loss_fn(outputs, masks)
                 total_val_loss += loss.item()
                 
-                # Calculate IoU metrics
+                # Calculate IoU metrics optimized for binary segmentation
                 preds = torch.argmax(outputs, dim=1)
-                for class_idx in range(1, NUM_CLASSES):  # Skip background class
-                    pred_mask = (preds == class_idx)
-                    true_mask = (masks == class_idx)
+                if NUM_CLASSES == 2:  # Binary segmentation
+                    batch_iou = calculate_binary_iou(preds, masks)
+                    mean_iou += batch_iou
+                else:
+                    # Use original multi-class IoU calculation
+                    intersection_sum = 0
+                    union_sum = 0
+                    for class_idx in range(1, NUM_CLASSES):  # Skip background class
+                        pred_mask = (preds == class_idx)
+                        true_mask = (masks == class_idx)
+                        
+                        intersection = (pred_mask & true_mask).sum().item()
+                        union = (pred_mask | true_mask).sum().item()
+                        
+                        if union > 0:
+                            intersection_sum += intersection
+                            union_sum += union
                     
-                    intersection = (pred_mask & true_mask).sum().item()
-                    union = (pred_mask | true_mask).sum().item()
-                    
-                    if union > 0:
-                        intersection_sum += intersection
-                        union_sum += union
+                    if union_sum > 0:
+                        mean_iou += intersection_sum / union_sum
         
         # Calculate average validation loss and IoU
         avg_val_loss = total_val_loss / len(val_loader)
-        mean_iou = intersection_sum / (union_sum + 1e-10)
+        
+        if NUM_CLASSES == 2:
+            mean_iou = mean_iou / len(val_loader)  # Average across batches
+        else:
+            mean_iou = mean_iou / len(val_loader)  # Already accumulated
         
         print(f"🔍 Validation Loss: {avg_val_loss:.4f}, Mean IoU: {mean_iou:.4f}")
         
@@ -196,7 +235,7 @@ def train(args):
         writer.add_scalar('Metrics/mIoU', mean_iou, epoch)
         
         # Update learning rate based on validation loss
-        scheduler.step(avg_val_loss)
+        scheduler.step()
         
         # ✅ Save Checkpoint
         checkpoint_path = f"models_checkpoints/checkpoint_epoch{epoch+1}.pth"
@@ -208,6 +247,7 @@ def train(args):
             'optimizer_state_dict': optimizer.state_dict(),
             'epoch': epoch,
             'loss': avg_val_loss,
+            'iou': mean_iou,
             'architecture': args.architecture,
             'encoder': args.encoder
         }
@@ -215,14 +255,30 @@ def train(args):
         torch.save(model_state, checkpoint_path)
         checkpoint_history.append(checkpoint_path)
         
-        # ✅ Save Best Model
-        if avg_val_loss < best_loss:
-            best_loss = avg_val_loss
+        # ✅ Save Best Model - Consider both loss and IoU
+        improved_loss = avg_val_loss < best_loss
+        improved_iou = mean_iou > best_iou
+        
+        if improved_loss or improved_iou:
+            if improved_loss:
+                best_loss = avg_val_loss
+            if improved_iou:
+                best_iou = mean_iou
+                
             no_improve_epochs = 0  # Reset Counter
             
             # Save best model
             torch.save(model_state, BEST_MODEL_PATH)
-            print(f"🔥 Best Model Saved at Epoch {epoch+1} with Loss: {avg_val_loss:.4f}")
+            
+            improvement_type = ""
+            if improved_loss and improved_iou:
+                improvement_type = "Loss and IoU"
+            elif improved_loss:
+                improvement_type = "Loss"
+            else:
+                improvement_type = "IoU"
+                
+            print(f"🔥 Best Model Saved at Epoch {epoch+1} with {improvement_type} improvement! Loss: {avg_val_loss:.4f}, IoU: {mean_iou:.4f}")
             
             # Visualize some predictions from best model
             if epoch > 0:  # Skip first epoch
@@ -320,7 +376,7 @@ def train(args):
     # Training completed
     training_time = time.time() - start_time
     print(f"\n✅ Training Completed in {training_time/3600:.2f} hours! 🎉")
-    print(f"📊 Best Validation Loss: {best_loss:.4f}")
+    print(f"📊 Best Validation Loss: {best_loss:.4f}, Best IoU: {best_iou:.4f}")
     
     # Close TensorBoard writer
     writer.close()
